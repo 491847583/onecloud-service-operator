@@ -40,10 +40,13 @@ type EndpointSpec struct {
 
 // URL is used to construct url string 'Protocol://Host:Port/Prefix'
 type URL struct {
-	Protocol string
-	Host     StringStore
-	Port     *int32
-	Prefix   string
+	// +optional
+	Protocol string      `json:"protocol,omitempty"`
+	Host     StringStore `json:"host,omitempty"`
+	// +optional
+	Port     *int32      `json:"port,omitempty"`
+	// +optional
+	Prefix   string      `json:"prefix,omitempty"`
 }
 
 // EndpointStatus defines the observed state of Endpoint
@@ -51,11 +54,7 @@ type EndpointStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// +optional
-	Phase ResourcePhase `json:"phase,omitempty"`
-	// A human readable message indicating details about why endpoint is in this phase.
-	// +optional
-	Reason string `json:"reason,omitempty"`
+	ResourceStatusBase
 	// +optional
 	ExternalInfo ExternalInfoBase `json:"externalInfo,omitempty"`
 	// CreateTimes record the continuous creation times.

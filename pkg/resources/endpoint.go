@@ -98,7 +98,7 @@ func (ep Endpoint) GetStatus(ctx context.Context) (*onecloudv1.EndpointStatus, e
 type EndpointUpdateField struct {
 	Url                string `json:"url"`
 	Name               string `json:"name"`
-	Enabled            string `json:"enabled"`
+	Enabled            bool `json:"enabled"`
 	ServiceCertificate string `json:"service_certificate"`
 }
 
@@ -109,13 +109,69 @@ func (ep Endpoint) Reconcile(ctx context.Context) (*onecloudv1.EndpointStatus, e
 		return nil, err
 	}
 	epStatus := rep.Status.DeepCopy()
+	epStatus.ExternalInfo = extInfo
 	var uField EndpointUpdateField
-	err := ret.Unmarshal(&uField)
+	err = ret.Unmarshal(&uField)
 	if err != nil {
 		return nil, err
 	}
-
-
-	return nil, nil
+	var change bool
+	if  uField.Name != rep.Spec.Name{
+		uField.Name = rep.Spec.Name
+		change = true
+	}
+	endabled := true
+	if rep.Spec.Disabled != nil && *rep.Spec.Disabled {
+		endabled = false
+	}
+	if uField.Enabled != endabled {
+		uField.Enabled = endabled
+		change = true
+	}
+	if uField.ServiceCertificate != rep.Spec.ServiceCertificate {
+		uField.ServiceCertificate = rep.Spec.ServiceCertificate
+		change = true
+	}
+	url, err := ep.Url(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(url) != 0 && uField.Url != url {
+		uField.Url = url
+		change = true
+	}
+	if !change {
+		return epStatus, nil
+	}
+	_, extInfo, err = RequestEndpoint.Operation(OperPatch).Apply(ctx, rep.Status.ExternalInfo.Id, jsonutils.Marshal(uField).(*jsonutils.JSONDict))
+	if err != nil {
+		return nil, err
+	}
+	epStatus.ExternalInfo = extInfo
+	return epStatus, nil
 }
 
+func (ep Endpoint) Url(ctx context.Context) (string, error) {
+	// fetch Host
+	url := ep.Endpoint.Spec.URL
+	host := url.Host
+	v, err := host.GetValue(ctx)
+	if err != nil {
+		return "", err
+	}
+	if v == nil {
+		return "", err
+	}
+	if v.IsZero() {
+		return "", nil
+	}
+	s := v.(onecloudv1.String)
+	protocol := "http"
+	if len(url.Protocol) != 0 {
+		protocol = url.Protocol
+	}
+	if url.Port != nil && *url.Port > 0 {
+		return fmt.Sprintf("%s://%s:%d/%s", protocol, s, *url.Port, url.Prefix), nil
+	}
+	return fmt.Sprintf("%s://%s/%s", protocol, s, url.Prefix), nil
+}

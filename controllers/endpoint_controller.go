@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"yunion.io/x/onecloud-service-operator/pkg/resources"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,12 +35,33 @@ type EndpointReconciler struct {
 
 // +kubebuilder:rbac:groups=onecloud.yunion.io,resources=endpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=onecloud.yunion.io,resources=endpoints/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=onecloud.yunion.io,resources=virtualmachines,verbs=get;list;watch
 
 func (r *EndpointReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-	_ = context.Background()
-	_ = r.Log.WithValues("endpoint", req.NamespacedName)
+	ctx := context.Background()
+	log := r.Log.WithValues("endpoint", req.NamespacedName)
 
-	// your logic here
+	var endpoint onecloudv1.Endpoint
+	if err := r.Get(ctx, req.NamespacedName, &endpoint); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	remoteEP := resources.NewEndpoint(&endpoint)
+
+	dealErr := func(err error) (ctrl.Result, error) {
+		return dealErr(ctx, log, r, &endpoint, resources.ResourceEndpoint, err)
+	}
+
+
+	UseFinallizer(ctx, r, &endpoint, func(ctx context.Context) (ctrl.Result, error) {
+		ret, err := r.realDelete(ctx, remoteEP)
+		if err != nil {
+			return dealErr(err)
+		}
+		return ret, err
+	})
+
+
 
 	return ctrl.Result{}, nil
 }

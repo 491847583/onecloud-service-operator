@@ -85,6 +85,7 @@ const (
 	OperCreate       ResourceOperation = "Create"
 	OperDelete       ResourceOperation = "Delete"
 	OperUpdate       ResourceOperation = "Update"
+	OperPatch        ResourceOperation = "Patch"
 	OperGet          ResourceOperation = "Get"
 	OperList         ResourceOperation = "List"
 	OperGetDetails   ResourceOperation = "GetDetails"
@@ -198,6 +199,10 @@ func (r SRequest) Apply(ctx context.Context, id string, params *jsonutils.JSONDi
 	case OperUpdate:
 		requestFunc = func(session *mcclient.ClientSession, id string, params *jsonutils.JSONDict) (jsonutils.JSONObject, error) {
 			return resourceManager.Update(session, id, params)
+		}
+	case OperPatch:
+		requestFunc = func(session *mcclient.ClientSession, id string, params *jsonutils.JSONDict) (jsonutils.JSONObject, error) {
+			return resourceManager.Patch(session, id, params)
 		}
 	case OperGet:
 		if len(id) > 0 {

@@ -17,20 +17,16 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-
-	"yunion.io/x/pkg/utils"
 
 	onecloudv1 "yunion.io/x/onecloud-service-operator/api/v1"
 	"yunion.io/x/onecloud-service-operator/pkg/options"
@@ -39,9 +35,7 @@ import (
 
 // AnsiblePlaybookReconciler reconciles a AnsiblePlaybook object
 type AnsiblePlaybookReconciler struct {
-	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	ReconcilerBase
 	// Enable intensive information collection during the reconcile process
 	Dense bool
 }
@@ -53,17 +47,17 @@ type AnsiblePlaybookReconciler struct {
 
 func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
-	log := r.Log.WithValues("ansibleplaybook", req.NamespacedName)
 
 	var ansiblePlaybook onecloudv1.AnsiblePlaybook
 	if err := r.Get(ctx, req.NamespacedName, &ansiblePlaybook); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	log := r.GetLog(&ansiblePlaybook)
 	remoteAp := resources.NewAnisblePlaybook(&ansiblePlaybook)
 
 	dealErr := func(err error) (ctrl.Result, error) {
-		return dealErr(ctx, log, r, &ansiblePlaybook, resources.ResourceAP, err)
+		return r.dealErr(ctx, remoteAp, err)
 	}
 
 	var (
@@ -71,33 +65,9 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 		dense          = options.Options.AnsiblePlaybookConfig.Dense
 	)
 
-	myFinalizerName := "virtualmachine.finalizers.onecloud.yunion.io"
-	// add finalizer
-	if ansiblePlaybook.ObjectMeta.DeletionTimestamp.IsZero() {
-		if !utils.IsInStringArray(myFinalizerName, ansiblePlaybook.ObjectMeta.Finalizers) {
-			ansiblePlaybook.ObjectMeta.Finalizers = append(ansiblePlaybook.ObjectMeta.Finalizers, myFinalizerName)
-			if err := r.Update(ctx, &ansiblePlaybook); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
-		}
-	} else {
-		if utils.IsInStringArray(myFinalizerName, ansiblePlaybook.ObjectMeta.Finalizers) {
-			if len(ansiblePlaybook.Status.ExternalInfo.Id) == 0 {
-				ansiblePlaybook.ObjectMeta.Finalizers = removeString(ansiblePlaybook.ObjectMeta.Finalizers,
-					myFinalizerName)
-				if err := r.Update(ctx, &ansiblePlaybook); err != nil {
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{}, nil
-			}
-			ret, err := r.realDelete(ctx, remoteAp)
-			if err != nil {
-				return dealErr(err)
-			}
-			return ret, nil
-		}
-		return ctrl.Result{}, nil
+	has, ret, err := r.UseFinallizer(ctx, remoteAp)
+	if !has {
+		return ret, err
 	}
 
 	if ansiblePlaybook.Status.Phase == onecloudv1.ResourceInvalid {
@@ -187,7 +157,7 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 					if err != nil {
 						// invalid
 						log.Error(err, "StringStore.GetValue")
-						ansiblePlaybook.SetResourcePhase(onecloudv1.ResourceInvalid,
+						ansiblePlaybook.GetResourceStatus().SetPhase(onecloudv1.ResourceInvalid,
 							fmt.Sprintf("The value of var '%s' is valid: %s", temVar.Name, err.Error()),
 						)
 						return ctrl.Result{}, r.Status().Update(ctx, &ansiblePlaybook)
@@ -216,7 +186,7 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 			}
 			// set phase invalid
 			if len(noVars) > 0 {
-				ansiblePlaybook.SetResourcePhase(onecloudv1.ResourceInvalid, fmt.Sprintf(
+				ansiblePlaybook.GetResourceStatus().SetPhase(onecloudv1.ResourceInvalid, fmt.Sprintf(
 					"Required these missed variables: %s for virtualMachine '%s'",
 					strings.Join(noVars, ", "), host.VirtualMachine.Name),
 				)
@@ -235,7 +205,7 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 			if err != nil {
 				// invalid
 				log.Error(err, "StringStore.GetValue")
-				ansiblePlaybook.SetResourcePhase(onecloudv1.ResourceInvalid,
+				ansiblePlaybook.GetResourceStatus().SetPhase(onecloudv1.ResourceInvalid,
 					fmt.Sprintf("The value of var '%s' is valid: %s", varName, err.Error()),
 				)
 				return ctrl.Result{}, r.Status().Update(ctx, &ansiblePlaybook)
@@ -250,12 +220,18 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 		}
 
 		// all other resources ready, create ansible playbook
-		return ctrl.Result{}, r.create(ctx, remoteAp, hosts, &playbookTemplate, commonVars)
+		return ctrl.Result{}, r.Create(ctx, remoteAp, resources.APCreateParams{hosts, &playbookTemplate, commonVars})
 	}
 
 	var recon func(ctx context.Context) (*onecloudv1.AnsiblePlaybookStatus, error)
 
-	recon = remoteAp.GetStatus
+	recon = func(ctx context.Context) (*onecloudv1.AnsiblePlaybookStatus, error) {
+		rs, err := remoteAp.GetStatus(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return rs.(*onecloudv1.AnsiblePlaybookStatus), err
+	}
 	if dense {
 		recon = remoteAp.Reconcile
 	}
@@ -269,7 +245,7 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 	}
 
 	if ansiblePlaybook.Status.Phase == onecloudv1.ResourceFailed {
-		if err := r.delete(ctx, remoteAp); err != nil {
+		if err := r.Delete(ctx, remoteAp); err != nil {
 			return dealErr(err)
 		}
 		return ctrl.Result{}, nil
@@ -288,74 +264,9 @@ func (r *AnsiblePlaybookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 	return ctrl.Result{}, nil
 }
 
-func (r *AnsiblePlaybookReconciler) realDelete(ctx context.Context, remoteAp resources.AnsiblePlaybook) (ctrl.Result, error) {
-	ap := remoteAp.AnsiblePlaybook
-	apStatus, err := remoteAp.GetStatus(ctx)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if r.requireUpdate(ap, apStatus) {
-		ap.Status = *apStatus
-		return ctrl.Result{}, r.Status().Update(ctx, ap)
-	}
-	// Pending
-	if ap.Status.Phase == onecloudv1.ResourcePending {
-		return ctrl.Result{Requeue: true, RequeueAfter: 5 * time.Second}, nil
-	}
-
-	// Unkown
-	if ap.Status.Phase == onecloudv1.ResourceUnkown {
-		return ctrl.Result{Requeue: true, RequeueAfter: 2 * time.Second}, nil
-	}
-	// delete this
-	if err := r.delete(ctx, remoteAp); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
-}
-
-func (r *AnsiblePlaybookReconciler) create(ctx context.Context, remoteAp resources.AnsiblePlaybook, hosts []resources.AnsiblePlaybookHost, apt *onecloudv1.AnsiblePlaybookTemplate, commonVars map[string]interface{}) error {
-	ap := remoteAp.AnsiblePlaybook
-	// check if recreate items has reached the max limit
-	maxRetryTimes := r.maxRetryTimes(ap)
-	if ap.Status.TryTimes > maxRetryTimes {
-		ap.Status.Phase = onecloudv1.ResourceInvalid
-		ap.Status.Reason = fmt.Sprintf("The number of consecutive retry failures exceeds the maximum %d", maxRetryTimes)
-		return r.Status().Update(ctx, ap)
-	}
-	extInfo, err := remoteAp.Create(ctx, resources.APCreateParams{Hosts: hosts, Apt: apt, CommonVars: commonVars})
-	if err != nil {
-		return err
-	}
-	ap.Status.ExternalInfo.ExternalInfoBase = extInfo
-	ap.Status.Phase = onecloudv1.ResourcePending
-	ap.Status.TryTimes += 1
-	return r.Status().Update(ctx, ap)
-}
-
-func (r *AnsiblePlaybookReconciler) delete(ctx context.Context, remoteAp resources.AnsiblePlaybook) error {
-	ap := remoteAp.AnsiblePlaybook
-	isDelete, extInfo, err := remoteAp.Delete(ctx)
-	if err != nil {
-		return err
-	}
-	if isDelete {
-		ap.Status.Phase = onecloudv1.ResourcePending
-	}
-	ap.Status.ExternalInfo.ExternalInfoBase = extInfo
-	return r.Status().Update(ctx, ap)
-}
-
 func (r *AnsiblePlaybookReconciler) clear(ctx context.Context, remoteAp resources.AnsiblePlaybook) error {
-	_, _, err := remoteAp.Delete(ctx)
+	_, err := remoteAp.Delete(ctx)
 	return err
-}
-
-func (r *AnsiblePlaybookReconciler) maxRetryTimes(ap *onecloudv1.AnsiblePlaybook) int32 {
-	if ap.Spec.MaxRetryTime == nil || *ap.Spec.MaxRetryTime <= 0 {
-		return math.MaxInt32
-	}
-	return *ap.Spec.MaxRetryTime
 }
 
 func (r *AnsiblePlaybookReconciler) requireUpdate(ap *onecloudv1.AnsiblePlaybook, newStatus *onecloudv1.AnsiblePlaybookStatus) bool {
